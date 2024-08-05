@@ -12,12 +12,13 @@ from dotenv import load_dotenv
 import gzip
 import shutil
 import gnupg
+from setup import envFile, file_mapping_supplier
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
 # Determine which .env file to load based on the environment
-environment = os.getenv('ENVIRONMENT', 'local')  # Default to local if not set
+environment = os.getenv('ENVIRONMENT', envFile)  # Default to local if not set
 env_file = f'.env.{environment}'
 
 # Load environment variables from the appropriate .env file
@@ -40,15 +41,12 @@ sftp_username = os.environ.get('SFTP_USERNAME')
 pem_file_location = os.environ.get('PEM_FILE_LOCATION')
 private_key_passphrase = os.environ.get('PRIVATE_KEY_PASSPHRASE')
 remote_directory = os.environ.get('REMOTE_DIRECTORY')
-local_download_path = os.environ.get('LOCAL_DOWNLOAD_PATH')
-output_csv_file = os.environ.get('OUTPUT_CSV_FILE')
+zip_directory = os.environ.get('ZIP_DIRECTORY')
+pgp_directory = os.environ.get('PGP_DIRECTORY')
+csv_directory = os.environ.get('CSV_DIRECTORY')
 private_key_file = os.environ.get('PRIVATE_KEY_FILE')
 passphrase = os.environ.get('PASSPHRASE')
-
-file_mapping = {
-    "AUS": "AUSSUPPLR_2024",
-    "OCA": "OCASUPPLR_2024" 
-}
+gnupg_local = os.environ.get("GNUPG_LOCATION")
 
 inbound_spark_management = {
     "file_name": "",           # The name of the file being processed
@@ -151,7 +149,6 @@ def check_and_download_file(sftp):
         return
     
     spark = None
-    file_present=False  
     try:
         spark = SparkSession.builder \
             .appName(spark_app_name) \
@@ -167,7 +164,7 @@ def check_and_download_file(sftp):
 
         current_date = datetime.now().strftime('%Y%m%d')
 
-        for region, filename_prefix in file_mapping.items():
+        for region, filename_prefix in file_mapping_supplier.items():
             inbound_spark_management['region'] = region
             remote_region_dir = f"{remote_directory}/{region}"
             logger.info(f"Checking directory: {remote_region_dir} for files with prefix: {filename_prefix} and date: {current_date}")
@@ -177,31 +174,44 @@ def check_and_download_file(sftp):
                 for file in files:
                     logger.info(f"Checking file: {file}")
                     if file.startswith(filename_prefix) and current_date in file:
-                        file_present=True
                         inbound_spark_management['file_name'] = file
                         inbound_spark_management['file_code'] = hashlib.sha256(file.encode()).hexdigest()
                         remote_file_path = f"{remote_region_dir}/{file}"
-                        local_file_path = f"{local_download_path}_{file}"
-                        sftp.get(remote_file_path, local_file_path)
-                        logger.info(f"Downloaded file: {remote_file_path} to {local_file_path}")
+                        pgp_file_path = f"{pgp_directory}/{file}"
+                        csv_file_path=f"{csv_directory}/{file}"
+                        # sftp.get(remote_file_path, pgp_file_path)
 
+                        output_csv_path = None
                         try:
                             start_time = datetime.now()
-                            base_filename = file[:-8]  # Extract base filename without extension
-                            output_csv_path = os.path.join(output_csv_file, base_filename + ".csv")
-                            decrypt_file_and_extract_csv(local_file_path, output_csv_path, private_key_file, passphrase)
-                            main(output_csv_path, spark, properties, db_url)
-                            supplier_table_step_2_insert_into_main(spark,properties,db_url)
-                            supplier_table_step_2_update_into_main()
-                            end_time = datetime.now()
-                            duration = end_time - start_time
-                            inbound_spark_management["start_time"] = start_time.strftime('%Y-%m-%d %H:%M:%S')
-                            inbound_spark_management["end_time"] = end_time.strftime('%Y-%m-%d %H:%M:%S')
-                            inbound_spark_management["duration"] = str(duration)
-                            inbound_spark_management["success_message"] = 'File Successfully Uploaded To Database'
-                            inbound_spark_management["status"] = 'Success'
-                            insertAuditTable(inbound_spark_management)
-                            logger.info("--------------------------Full Process Complete Succesfully----------------------------")  
+                            if file.endswith('.pgp'):
+                                logger.info(f" Inside The PGP Loop ")
+                                sftp.get(remote_file_path, pgp_file_path)
+                                logger.info(f"Downloaded file: {remote_file_path} to {pgp_file_path}")
+                                output_csv_path = decrypt_file_and_extract_csv(
+                                    pgp_file_path, pgp_directory, zip_directory, private_key_file, passphrase)
+                            elif file.endswith('.csv'):
+                                logger.info(f" Inside The Csv Loop ")
+                                sftp.get(remote_file_path, csv_file_path)
+                                logger.info(f"Downloaded file: {remote_file_path} to {csv_file_path}")
+                                output_csv_path = csv_file_path
+                            else:
+                                raise ValueError('Unsupported file type from SFTP')
+                            if output_csv_path:
+                                main(output_csv_path, spark, properties, db_url)
+                                supplier_table_step_2_insert_into_main(spark,properties,db_url)
+                                supplier_table_step_2_update_into_main()
+                                end_time = datetime.now()
+                                duration = end_time - start_time
+                                inbound_spark_management["start_time"] = start_time.strftime('%Y-%m-%d %H:%M:%S')
+                                inbound_spark_management["end_time"] = end_time.strftime('%Y-%m-%d %H:%M:%S')
+                                inbound_spark_management["duration"] = str(duration)
+                                inbound_spark_management["success_message"] = 'File Successfully Uploaded To Database'
+                                inbound_spark_management["status"] = 'Success'
+                                insertAuditTable(inbound_spark_management)
+                                logger.info("Full Process Complete Successfully")
+                            else:
+                                raise ValueError('Failed to determine the output CSV path')
                         except Exception as e:
                             logger.error(f"An error occurred: {str(e)}")
                             inbound_spark_management["error_message"] = f'Error while executing main method: {e}'
@@ -212,72 +222,68 @@ def check_and_download_file(sftp):
                 inbound_spark_management["error_message"] = f'Error listing files in directory {remote_region_dir}: {e}'
                 inbound_spark_management["status"] = 'Failed'
                 insertAuditTable(inbound_spark_management)
-                logger.info("--------------------------Full Process Complete Succesfully----------------------------")  
-
     except Exception as e:
         logger.error(f"Error while executing check_and_download_file: {e}")
         inbound_spark_management["error_message"] = f'Error while executing check_and_download_file method: {e}'
         inbound_spark_management["status"] = 'Failed'
         insertAuditTable(inbound_spark_management)
-        if spark:
-            spark.stop()
-    finally:
+    finally:    
         if sftp:
             sftp.close()
-        try:    
-            if spark:
-             spark.stop()
-        except:
-            pass
-        finally:    
-            if file_present:  
-             if os.path.exists(local_file_path):
-                os.remove(local_file_path)
-                logger.info(f"Deleted the local file: {local_file_path}")
+        if spark:
+            spark.stop()
 
-def decrypt_file_and_extract_csv(encrypted_file, output_csv_file, private_key_file, passphrase):
-    # Temporary file for GZIP output
-    decrypted_gzip_file = output_csv_file + '.gz'
-
-    # Initialize the GPG object, specifying the path to the gpg executable
-    gpg = gnupg.GPG(gpgbinary=r'C:\Program Files (x86)\gnupg\bin\gpg.exe')
-
-    # Step 1: Import the private key
-    with open(private_key_file, 'r') as key_file:
-        key_data = key_file.read()
-        import_result = gpg.import_keys(key_data)
+def decrypt_file_and_extract_csv(encrypted_file, csv_file_directory, temp_file_directory, private_key_file, passphrase):
+    try:
+        base_filename = os.path.basename(encrypted_file).replace('.pgp', '')
+        decrypted_temp_file = os.path.join(temp_file_directory, base_filename)
+         # Clean the base filename to remove '.gz' and '.zip'
+        cleaned_filename = base_filename.replace('.gz', '').replace('.zip', '')
         
-        # Check if the key was successfully imported
-        if import_result.count == 0:
-            print("Failed to import the private key.")
-            return False
-        print("Key import result:", import_result)
+        # Determine the final CSV output path based on filename
+        if base_filename.endswith('.gz'):
+            output_csv_file = os.path.join(csv_file_directory, cleaned_filename + '.csv')
+        else:
+            output_csv_file = os.path.join(csv_file_directory, cleaned_filename)
+        logger.info(f"Base filename: {base_filename}")
 
-    # Ensure the output directory exists
-    output_dir = os.path.dirname(output_csv_file)
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+        gpg = gnupg.GPG(gpgbinary=gnupg_local)
 
-    # Step 2: Decrypt the file to a GZIP archive
-    with open(encrypted_file, 'rb') as f:
-        decrypted_data = gpg.decrypt_file(f, passphrase=passphrase, output=decrypted_gzip_file, always_trust=True)
+        with open(private_key_file, 'r') as key_file:
+            key_data = key_file.read()
+            import_result = gpg.import_keys(key_data)
 
-    if decrypted_data.ok:
+            if import_result.count == 0:
+                logger.error("Failed to import the private key.")
+                return None
+
+        if not os.path.exists(csv_file_directory):
+            os.makedirs(csv_file_directory)
+
+        if not os.path.exists(temp_file_directory):
+            os.makedirs(temp_file_directory)
+
+        with open(encrypted_file, 'rb') as f:
+            decrypted_data = gpg.decrypt_file(f, passphrase=passphrase, output=decrypted_temp_file, always_trust=True)
+        if decrypted_data.ok:
         # Extract CSV from GZIP
-        with gzip.open(decrypted_gzip_file, 'rb') as gz_file:
-            with open(output_csv_file, 'wb') as csv_file:
-                shutil.copyfileobj(gz_file, csv_file)
+            with gzip.open(decrypted_temp_file, 'rb') as gz_file:
+                with open(output_csv_file, 'wb') as csv_file:
+                    shutil.copyfileobj(gz_file, csv_file)
 
-        # Remove temporary GZIP file
-        os.remove(decrypted_gzip_file)
+            # Remove temporary GZIP file
+            os.remove(decrypted_temp_file)
 
-        print(f"Decryption and extraction successful: {output_csv_file}")
-        return True
-    else:
-        print("Decryption failed.")
-        print(f"Status: {decrypted_data.status}")
-        print(f"Stderr: {decrypted_data.stderr}")
-        return False    
+            print(f"Decryption and extraction successful: {output_csv_file}")
+            return output_csv_file
+        else:
+            print("Decryption failed.")
+            print(f"Status: {decrypted_data.status}")
+            print(f"Stderr: {decrypted_data.stderr}")
+            return False
+    except Exception as e:
+        logger.error(f"Error during decryption: {str(e)}")
+        return None    
 
 def read_csv_data(path_to_csv, spark):
     try:
@@ -384,13 +390,18 @@ def main(local_file_path,spark,properties,url):
         
         csv = read_csv_data(path_to_csv=local_file_path, spark=spark)
         log_time(log_start_time,"Time Taken in First Stage Wich is Reading data FRom Csv and Casting to Proper dataType")
-        
-        csv = csv .withColumn('updated_by', lit("admin"))\
+        csv_count = csv.count()
+        logger.info(f"readCsv rows count: {csv_count}")
+
+        if csv_count == 0:
+            logger.info("CSV row count is 0.")
+
+        csv = csv .withColumn('updated_by', lit("system@spriced.com"))\
                  .withColumn('updated_date', lit(datetime.now()))\
                  .withColumn('validationstatus', lit(" "))\
                  .withColumn('is_valid', lit(False))\
                  .withColumn('created_date', lit(datetime.now()))\
-                 .withColumn('created_by', lit("admin"))\
+                 .withColumn('created_by', lit("system@spriced.com"))\
                  .withColumn('comment', lit(" "))\
 
        # Assuming 'csv' is your DataFrame

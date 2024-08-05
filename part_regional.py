@@ -12,12 +12,13 @@ from dotenv import load_dotenv
 import gzip
 import shutil
 import gnupg
+from setup import file_mapping_part_region, envFile
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__) 
 
 # Determine which .env file to load based on the environment
-environment = os.getenv('ENVIRONMENT', 'local')  # Default to local if not set
+environment = os.getenv('ENVIRONMENT', envFile)  # Default to local if not set
 env_file = f'.env.{environment}'
 
 # Load environment variables from the appropriate .env file
@@ -41,17 +42,12 @@ sftp_username = os.environ.get('SFTP_USERNAME')
 pem_file_location = os.environ.get('PEM_FILE_LOCATION')
 private_key_passphrase = os.environ.get('PRIVATE_KEY_PASSPHRASE')
 remote_directory = os.environ.get('REMOTE_DIRECTORY')
-local_download_path = os.environ.get('LOCAL_DOWNLOAD_PATH')
-output_csv_file = os.environ.get('OUTPUT_CSV_FILE')
+zip_directory = os.environ.get('ZIP_DIRECTORY')
+pgp_directory = os.environ.get('PGP_DIRECTORY')
+csv_directory = os.environ.get('CSV_DIRECTORY')
 private_key_file = os.environ.get('PRIVATE_KEY_FILE')
 passphrase = os.environ.get('PASSPHRASE')
-
-# Define file mappings for each region
-file_mapping = {
-    "CA": "ACAPARTREG_2024",
-    "OCA": "OCAPARTREG_2024",
-    "AUS": "AUSPARTREG_2024"
-}
+gnupg_local = os.environ.get("GNUPG_LOCATION")
 
 inbound_spark_management = {
     "file_name": "",           # The name of the file being processed
@@ -234,8 +230,6 @@ def check_and_download_file(sftp):
         return
     
     spark = None
-    local_file_path = None
-    file_present=False
     try:
         spark = SparkSession.builder \
             .appName(spark_app_name) \
@@ -251,43 +245,65 @@ def check_and_download_file(sftp):
 
         current_date = datetime.now().strftime('%Y%m%d')
 
-        for region, filename_prefix in file_mapping.items():
+        for region, filename_prefix in file_mapping_part_region.items():
             inbound_spark_management['region'] = region
             remote_region_dir = f"{remote_directory}/{region}"
             logger.info(f"Checking directory: {remote_region_dir} for files with prefix: {filename_prefix} and date: {current_date}")
-            files = sftp.listdir(remote_region_dir)
-            for file in files:
-                logger.info(f"Checking file: {file}")
-                if file.startswith(filename_prefix) and current_date in file:
-                    inbound_spark_management['file_name'] = file
-                    inbound_spark_management['file_code'] = hashlib.sha256(file.encode()).hexdigest()
-                    remote_file_path = f"{remote_region_dir}/{file}"
-                    local_file_path = f"{local_download_path}_{file}"
-                    sftp.get(remote_file_path, local_file_path)
-                    logger.info(f"Downloaded file: {remote_file_path} to {local_file_path}")
 
-                    try:
-                        start_time = datetime.now()
-                        base_filename = file[:-8]  # Extract base filename without extension
-                        output_csv_path = os.path.join(output_csv_file, base_filename + ".csv")
-                        decrypt_file_and_extract_csv(local_file_path, output_csv_path, private_key_file, passphrase)
-                        main(output_csv_path, spark, properties, db_url)
-                        part_regional_table_step_2_insert_into_main(spark,properties,db_url)
-                        part_regional_table_step_3_update_into_main()
-                        end_time = datetime.now()
-                        duration = end_time - start_time
-                        inbound_spark_management["start_time"] = start_time.strftime('%Y-%m-%d %H:%M:%S')
-                        inbound_spark_management["end_time"] = end_time.strftime('%Y-%m-%d %H:%M:%S')
-                        inbound_spark_management["duration"] = str(duration)
-                        inbound_spark_management["success_message"] = 'File Successfully Uploaded To Database'
-                        inbound_spark_management["status"] = 'Success'
-                        insertAuditTable(inbound_spark_management)
-                        logger.info("--------------------------Full Process Complete Succesfully----------------------------")  
-                    except Exception as e:
-                        logger.error(f"An error occurred: {str(e)}")
-                        inbound_spark_management["error_message"] = f'Error while executing main method: {e}'
-                        inbound_spark_management["status"] = 'Failed'
-                        insertAuditTable(inbound_spark_management)
+            try:
+                files = sftp.listdir(remote_region_dir)
+                for file in files:
+                    logger.info(f"Checking file: {file}")
+                    if file.startswith(filename_prefix) and current_date in file:
+                        inbound_spark_management['file_name'] = file
+                        inbound_spark_management['file_code'] = hashlib.sha256(file.encode()).hexdigest()
+                        remote_file_path = f"{remote_region_dir}/{file}"
+                        pgp_file_path = f"{pgp_directory}/{file}"
+                        csv_file_path=f"{csv_directory}/{file}"
+                        # sftp.get(remote_file_path, pgp_file_path)
+
+                        output_csv_path = None
+                        try:
+                            start_time = datetime.now()
+                            if file.endswith('.pgp'):
+                                logger.info(f" Inside The PGP Loop ")
+                                sftp.get(remote_file_path, pgp_file_path)
+                                logger.info(f"Downloaded file: {remote_file_path} to {pgp_file_path}")
+                                output_csv_path = decrypt_file_and_extract_csv(
+                                pgp_file_path, pgp_directory, zip_directory, private_key_file, passphrase)
+                            elif file.endswith('.csv'):
+                                logger.info(f" Inside The Csv Loop ")
+                                sftp.get(remote_file_path, csv_file_path)
+                                logger.info(f"Downloaded file: {remote_file_path} to {csv_file_path}")
+                                output_csv_path = csv_file_path
+                            else:
+                                raise ValueError('Unsupported file type from SFTP')
+
+                            if output_csv_path: 
+                                main(output_csv_path, spark, properties, db_url)
+                                part_regional_table_step_2_insert_into_main(spark,properties,db_url)
+                                part_regional_table_step_3_update_into_main()
+                                end_time = datetime.now()
+                                duration = end_time - start_time
+                                inbound_spark_management["start_time"] = start_time.strftime('%Y-%m-%d %H:%M:%S')
+                                inbound_spark_management["end_time"] = end_time.strftime('%Y-%m-%d %H:%M:%S')
+                                inbound_spark_management["duration"] = str(duration)
+                                inbound_spark_management["success_message"] = 'File Successfully Uploaded To Database'
+                                inbound_spark_management["status"] = 'Success'
+                                insertAuditTable(inbound_spark_management)
+                                logger.info("Full Process Complete Successfully")
+                            else:
+                                raise ValueError('Failed to determine the output CSV path')  
+                        except Exception as e:
+                            logger.error(f"An error occurred: {str(e)}")
+                            inbound_spark_management["error_message"] = f'Error while executing main method: {e}'
+                            inbound_spark_management["status"] = 'Failed'
+                            insertAuditTable(inbound_spark_management)
+            except Exception as e:
+                logger.error(f"Error listing files in directory {remote_region_dir}: {e}")
+                inbound_spark_management["error_message"] = f'Error listing files in directory {remote_region_dir}: {e}'
+                inbound_spark_management["status"] = 'Failed'
+                insertAuditTable(inbound_spark_management)
     except Exception as e:
         logger.error(f"Error while executing check_and_download_file: {e}")
         inbound_spark_management["error_message"] = f'Error while executing check_and_download_file method: {e}'
@@ -296,60 +312,60 @@ def check_and_download_file(sftp):
     finally:
         if sftp:
             sftp.close()
-        try:    
-            if spark:
-                spark.stop()
-        except:
-            pass
-        finally:  
-            if file_present:  
-             if os.path.exists(local_file_path):
-                os.remove(local_file_path)
-                logger.info(f"Deleted the local file: {local_file_path}")
+        if spark:
+            spark.stop()
 
-def decrypt_file_and_extract_csv(encrypted_file, output_csv_file, private_key_file, passphrase):
-    # Temporary file for GZIP output
-    decrypted_gzip_file = output_csv_file + '.gz'
-
-    # Initialize the GPG object, specifying the path to the gpg executable
-    gpg = gnupg.GPG(gpgbinary=r'C:\Program Files (x86)\gnupg\bin\gpg.exe')
-
-    # Step 1: Import the private key
-    with open(private_key_file, 'r') as key_file:
-        key_data = key_file.read()
-        import_result = gpg.import_keys(key_data)
+def decrypt_file_and_extract_csv(encrypted_file, csv_file_directory, temp_file_directory, private_key_file, passphrase):
+    try:
+        base_filename = os.path.basename(encrypted_file).replace('.pgp', '')
+        decrypted_temp_file = os.path.join(temp_file_directory, base_filename)
+         # Clean the base filename to remove '.gz' and '.zip'
+        cleaned_filename = base_filename.replace('.gz', '').replace('.zip', '')
         
-        # Check if the key was successfully imported
-        if import_result.count == 0:
-            print("Failed to import the private key.")
-            return False
-        print("Key import result:", import_result)
+        # Determine the final CSV output path based on filename
+        if base_filename.endswith('.gz'):
+            output_csv_file = os.path.join(csv_file_directory, cleaned_filename + '.csv')
+        else:
+            output_csv_file = os.path.join(csv_file_directory, cleaned_filename)
+        logger.info(f"Base filename: {base_filename}")
 
-    # Ensure the output directory exists
-    output_dir = os.path.dirname(output_csv_file)
-    if output_dir and not os.path.exists(output_dir):
-        os.makedirs(output_dir)
+        gpg = gnupg.GPG(gpgbinary=gnupg_local)
 
-    # Step 2: Decrypt the file to a GZIP archive
-    with open(encrypted_file, 'rb') as f:
-        decrypted_data = gpg.decrypt_file(f, passphrase=passphrase, output=decrypted_gzip_file, always_trust=True)
+        with open(private_key_file, 'r') as key_file:
+            key_data = key_file.read()
+            import_result = gpg.import_keys(key_data)
 
-    if decrypted_data.ok:
+            if import_result.count == 0:
+                logger.error("Failed to import the private key.")
+                return None
+
+        if not os.path.exists(csv_file_directory):
+            os.makedirs(csv_file_directory)
+
+        if not os.path.exists(temp_file_directory):
+            os.makedirs(temp_file_directory)
+
+        with open(encrypted_file, 'rb') as f:
+            decrypted_data = gpg.decrypt_file(f, passphrase=passphrase, output=decrypted_temp_file, always_trust=True)
+        if decrypted_data.ok:
         # Extract CSV from GZIP
-        with gzip.open(decrypted_gzip_file, 'rb') as gz_file:
-            with open(output_csv_file, 'wb') as csv_file:
-                shutil.copyfileobj(gz_file, csv_file)
+            with gzip.open(decrypted_temp_file, 'rb') as gz_file:
+                with open(output_csv_file, 'wb') as csv_file:
+                    shutil.copyfileobj(gz_file, csv_file)
 
-        # Remove temporary GZIP file
-        os.remove(decrypted_gzip_file)
+            # Remove temporary GZIP file
+            os.remove(decrypted_temp_file)
 
-        print(f"Decryption and extraction successful: {output_csv_file}")
-        return True
-    else:
-        print("Decryption failed.")
-        print(f"Status: {decrypted_data.status}")
-        print(f"Stderr: {decrypted_data.stderr}")
-        return False
+            print(f"Decryption and extraction successful: {output_csv_file}")
+            return output_csv_file
+        else:
+            print("Decryption failed.")
+            print(f"Status: {decrypted_data.status}")
+            print(f"Stderr: {decrypted_data.stderr}")
+            return False
+    except Exception as e:
+        logger.error(f"Error during decryption: {str(e)}")
+        return None
 
 def read_csv_data(path_to_csv, spark):
     try:
@@ -381,7 +397,7 @@ def match_csv_and_x_product(csvdf, xproductdf, columnNameToAddWithMatchDf):
         match_df = match_df.filter(col("code").isNotNull())
         match_df = match_df.withColumn(columnNameToAddWithMatchDf, col("id"))
         # Drop unnecessary columns
-        drop_columns = ['id', 'name', 'updated_by', 'updated_date', 'validationstatus', 'is_valid', 'created_date', 'created_by', 'comment']
+        drop_columns = ['id', 'name', 'updated_by', 'updated_date', 'validationstatus', 'is_valid', 'created_date', 'created_by', 'comment', 'code']
         match_df = match_df.drop(*drop_columns)
         return match_df
     except Exception as e:
@@ -391,15 +407,17 @@ def match_csv_and_x_product(csvdf, xproductdf, columnNameToAddWithMatchDf):
 
 def x_product_code_1_digit(csvdf, x_product_code_1_df, spark, url, properties):
     try:
-        csvdf = csvdf.withColumn('code', col('part_num')).filter(col('part_num').isNotNull())
+        # csvdf = csvdf.withColumn('code', col('part_num')).filter(col('part_num').isNotNull())
+
+        csvdf = csvdf.withColumn('code', substring(col('prod_cd5'), 1, 1)).filter(col('prod_cd5').isNotNull())
         unmatched_csv = csvdf.join(x_product_code_1_df, "code", "left_anti")
         unmatched_csv = unmatched_csv.withColumn('name', lit("to be filled"))\
-                                     .withColumn('updated_by', lit("admin"))\
+                                     .withColumn('updated_by', lit("system@spriced.com"))\
                                      .withColumn('updated_date', lit(datetime.now()))\
                                      .withColumn('validationstatus', lit("true"))\
                                      .withColumn('is_valid', lit(False))\
                                      .withColumn('created_date', lit(datetime.now()))\
-                                     .withColumn('created_by', lit("admin"))\
+                                     .withColumn('created_by', lit("system@spriced.com"))\
                                      .withColumn('comment', lit(" "))
         
         selected_cols_unmatched = unmatched_csv.select(
@@ -412,6 +430,10 @@ def x_product_code_1_digit(csvdf, x_product_code_1_df, spark, url, properties):
         selected_cols_unmatched = selected_cols_unmatched.filter(col('code').isNotNull())
         logger.info(f"__________ rows to append on x_product_code_1_digit Without null: {selected_cols_unmatched.count()}")
         selected_cols_unmatched.write.jdbc(url=url, table="x_product_code_1_digit", mode="append", properties=properties)
+
+        # Drop the 'code' column after writing to the database
+        selected_cols_unmatched = selected_cols_unmatched.drop('code')
+
         new_x_product_code_1 = spark.read.jdbc(url=url, table="x_product_code_1_digit", properties=properties)
         match_df = match_csv_and_x_product(csvdf, new_x_product_code_1, columnNameToAddWithMatchDf="prod_cd1")
         return match_df
@@ -422,15 +444,15 @@ def x_product_code_1_digit(csvdf, x_product_code_1_df, spark, url, properties):
 
 def x_product_code_3_digit(csvdf, x_product_code_3_df, spark, url, properties):
    try: 
-        csvdf = csvdf.withColumn('code', col('part_num')).filter(col('part_num').isNotNull())
+        csvdf = csvdf.withColumn('code', substring(col('prod_cd5'), 1, 3)).filter(col('prod_cd5').isNotNull())
         unmatched_csv = csvdf.join(x_product_code_3_df, "code", "left_anti")
         unmatched_csv = unmatched_csv.withColumn('name', lit("to be filled"))\
-                                     .withColumn('updated_by', lit("admin"))\
+                                     .withColumn('updated_by', lit("system@spriced.com"))\
                                      .withColumn('updated_date', lit(datetime.now()))\
                                      .withColumn('validationstatus', lit("true"))\
                                      .withColumn('is_valid', lit(False))\
                                      .withColumn('created_date', lit(datetime.now()))\
-                                     .withColumn('created_by', lit("admin"))\
+                                     .withColumn('created_by', lit("system@spriced.com"))\
                                      .withColumn('comment', lit(" "))
         
         selected_cols_unmatched = unmatched_csv.select(
@@ -444,6 +466,10 @@ def x_product_code_3_digit(csvdf, x_product_code_3_df, spark, url, properties):
         # logger.info(f"__________ rows to append on x_product_code_3_digit Without null: {selected_cols_unmatched.count()}")
         
         selected_cols_unmatched.write.jdbc(url=url, table="x_product_code_3_digit", mode="append", properties=properties)
+
+        # Drop the 'code' column after writing to the database
+        selected_cols_unmatched = selected_cols_unmatched.drop('code')
+
         new_x_product_code_3 = spark.read.jdbc(url=url, table="x_product_code_3_digit", properties=properties)
         match_df = match_csv_and_x_product(csvdf, new_x_product_code_3,columnNameToAddWithMatchDf="prod_cd3")
         return match_df
@@ -481,12 +507,12 @@ def compare_code_csv_with_x_sub_brand(csvdf, x_sub_brand_df, spark, url, propert
         csvdf = csvdf.withColumn('code', col('part_num')).filter(col('part_num').isNotNull())
         unmatched_csv = csvdf.join(x_sub_brand_df, "code", "left_anti")
         unmatched_csv = unmatched_csv.withColumn('name', lit("to be filled"))\
-                                     .withColumn('updated_by', lit("admin"))\
+                                     .withColumn('updated_by', lit("system@spriced.com"))\
                                      .withColumn('updated_date', lit(datetime.now()))\
                                      .withColumn('validationstatus', lit("true"))\
                                      .withColumn('is_valid', lit(False))\
                                      .withColumn('created_date', lit(datetime.now()))\
-                                     .withColumn('created_by', lit("admin"))\
+                                     .withColumn('created_by', lit("system@spriced.com"))\
                                      .withColumn('comment', lit(" "))
         
         selected_cols_unmatched = unmatched_csv.select(
@@ -510,12 +536,12 @@ def compare_code_csv_with_x_mfg_prod_code(csvdf, xproductdf, spark, url, propert
     try:
         unmatched_csv = csvdf.join(xproductdf, "code", "left_anti")
         unmatched_csv = unmatched_csv.withColumn('name', lit("to be filled"))\
-                                     .withColumn('updated_by', lit("admin"))\
+                                     .withColumn('updated_by', lit("system@spriced.com"))\
                                      .withColumn('updated_date', lit(datetime.now()))\
                                      .withColumn('validationstatus', lit("true"))\
                                      .withColumn('is_valid', lit(False))\
                                      .withColumn('created_date', lit(datetime.now()))\
-                                     .withColumn('created_by', lit("admin"))\
+                                     .withColumn('created_by', lit("system@spriced.com"))\
                                      .withColumn('comment', lit(" "))
         
         selected_cols_unmatched = unmatched_csv.select(
@@ -539,12 +565,12 @@ def compare_code_csv_with_x_mfg_prod_code_class(csvdf, xproductdf, spark, url, p
     try:
         unmatched_csv = csvdf.join(xproductdf, "code", "left_anti")
         unmatched_csv = unmatched_csv.withColumn('name', lit("to be filled"))\
-                                     .withColumn('updated_by', lit("admin"))\
+                                     .withColumn('updated_by', lit("system@spriced.com"))\
                                      .withColumn('updated_date', lit(datetime.now()))\
                                      .withColumn('validationstatus', lit("true"))\
                                      .withColumn('is_valid', lit(False))\
                                      .withColumn('created_date', lit(datetime.now()))\
-                                     .withColumn('created_by', lit("admin"))\
+                                     .withColumn('created_by', lit("system@spriced.com"))\
                                      .withColumn('comment', lit(" "))
         
         selected_cols_unmatched = unmatched_csv.select(
@@ -569,12 +595,12 @@ def compare_code_csv_with_org_chart(csvdf, xproductdf, spark, url, properties):
     try:
         unmatched_csv = csvdf.join(xproductdf, "code", "left_anti")
         unmatched_csv = unmatched_csv.withColumn('name', lit("to be filled"))\
-                                     .withColumn('updated_by', lit("admin"))\
+                                     .withColumn('updated_by', lit("system@spriced.com"))\
                                      .withColumn('updated_date', lit(datetime.now()))\
                                      .withColumn('validationstatus', lit("true"))\
                                      .withColumn('is_valid', lit(False))\
                                      .withColumn('created_date', lit(datetime.now()))\
-                                     .withColumn('created_by', lit("admin"))\
+                                     .withColumn('created_by', lit("system@spriced.com"))\
                                      .withColumn('comment', lit(" "))
         
         selected_cols_unmatched = unmatched_csv.select(
@@ -596,6 +622,7 @@ def compare_code_csv_with_org_chart(csvdf, xproductdf, spark, url, properties):
 
 def compare_code_csv_with_x_market_code(csvdf, x_market_code_df):
     try:
+        csvdf = csvdf.withColumn('code', col('mktcd')).filter(col('mktcd').isNotNull())
         x_market_code = x_market_code_df.select('code' , 'level1', 'level2', 'level3', 'level4', 'level5')
         # Find unmatched rows
         matched_csv = csvdf.join(x_market_code, "code", "inner")
@@ -608,7 +635,7 @@ def compare_code_csv_with_x_market_code(csvdf, x_market_code_df):
         matched_csv = matched_csv.withColumn('mktcdl5', x_market_code['level5'].cast(IntegerType()))
 
         # logger.info(f"__________ Rows Count in Rule 8 Before drop Duplicate based on dw: {matched_csv.count()}")
-        drop_cols = ['level1', 'level2', 'level3', 'level4', 'level5']
+        drop_cols = ['level1', 'level2', 'level3', 'level4', 'level5', 'code']
         matched_csv = matched_csv.drop(*drop_cols)
 
         unmatched_csv = unmatched_csv.withColumn('mktcdl1', lit(None))
@@ -616,6 +643,8 @@ def compare_code_csv_with_x_market_code(csvdf, x_market_code_df):
         unmatched_csv = unmatched_csv.withColumn('mktcdl3', lit(None))
         unmatched_csv = unmatched_csv.withColumn('mktcdl4', lit(None))
         unmatched_csv = unmatched_csv.withColumn('mktcdl5', lit(None))
+
+        unmatched_csv = unmatched_csv.drop('code')
 
         # logger.info(f"__________ rows to append on x_market_code Without null: {unmatched_csv.count()}")
         merged_df = unmatched_csv.union(matched_csv)
@@ -732,12 +761,12 @@ def x_brand(csvdf, xproductdf, spark, url, properties):
         unmatched_csv = csvdf.join(xproductdf, "code", "left_anti")
 
         unmatched_csv = unmatched_csv.withColumn('name', lit("to be filled"))\
-                                     .withColumn('updated_by', lit("admin"))\
+                                     .withColumn('updated_by', lit("system@spriced.com"))\
                                      .withColumn('updated_date', lit(datetime.now()))\
                                      .withColumn('validationstatus', lit("true"))\
                                      .withColumn('is_valid', lit(False))\
                                      .withColumn('created_date', lit(datetime.now()))\
-                                     .withColumn('created_by', lit("admin"))\
+                                     .withColumn('created_by', lit("system@spriced.com"))\
                                      .withColumn('comment', lit(" "))
         
         selected_cols_unmatched = unmatched_csv.select(
@@ -768,12 +797,12 @@ def org_chart(csvdf, xproductdf, spark, url, properties):
 
  
         unmatched_csv = unmatched_csv.withColumn('name', lit("to be filled"))\
-                                     .withColumn('updated_by', lit("admin"))\
+                                     .withColumn('updated_by', lit("system@spriced.com"))\
                                      .withColumn('updated_date', lit(datetime.now()))\
                                      .withColumn('validationstatus', lit("true"))\
                                      .withColumn('is_valid', lit(False))\
                                      .withColumn('created_date', lit(datetime.now()))\
-                                     .withColumn('created_by', lit("admin"))\
+                                     .withColumn('created_by', lit("system@spriced.com"))\
                                      .withColumn('comment', lit(" "))
         
         logger.info(f"__________ Rows Count in Rule 12 Before drop Duplicate based on dw: {selected_cols_unmatched.count()}")
@@ -795,7 +824,17 @@ def org_chart(csvdf, xproductdf, spark, url, properties):
 
 def data_to_insert_staging_table(csv ,hash_table_db, url, properties):
     try:
+        if 'part_num' in csv.columns:
+            csv = csv.withColumn('code', concat_ws("",col('part_num'), col('rgcd')))
+        else:
+            raise Exception("Column 'part_num' does not exist in the CSV DataFrame")
+
         start_time = time.time()
+
+        # Ensure 'code' exists in hash_table_db DataFrame
+        if 'code' not in hash_table_db.columns:
+            raise Exception("Column 'code' does not exist in the hash_table_db DataFrame")
+        
         missing_ids_csv = csv.join(hash_table_db, "code", "left_anti")
         if missing_ids_csv.count() == 0:
             return
@@ -805,7 +844,7 @@ def data_to_insert_staging_table(csv ,hash_table_db, url, properties):
         csv_to_insert_stage = csv_to_insert_stage.drop('check_sum')
         start_time = time.time()
         # csv_to_insert_stage.printSchema()
-        csv_to_insert_stage = csv_to_insert_stage.drop('code')
+        csv_to_insert_stage = csv_to_insert_stage.drop('code').drop('id')
         csv_to_insert_stage.write.jdbc(url=url, table="part_regional_insert_staging", mode="append", properties=properties)
         #log_time(start_time=start_time,str="csv to insert stage")
         print("-----------------------insertIntoHash-Before------------------")
@@ -822,6 +861,15 @@ def data_to_insert_staging_table(csv ,hash_table_db, url, properties):
 
 def data_to_update_staging_table(csv, hash_table_db, url, properties):
     try:
+        csv = csv.withColumn('code', concat_ws("",col('part_num'), col('rgcd')))
+        code_matching = hash_table_db.join(csv, "code", 'inner')
+        code_matching = code_matching.drop(hash_table_db['hash_value'])
+        code_matching = code_matching.drop(hash_table_db['check_sum'])
+        csv = code_matching.drop(hash_table_db['id'])
+
+        # hash_table_db.printSchema()
+        # csv.printSchema()
+       
         updated_hash_csv = csv.join(hash_table_db, "hash_value", "left_anti" )
         logger.info(f"data to be updated: {updated_hash_csv.count()}")
         
@@ -853,6 +901,9 @@ def main(local_file_path, spark, properties, url):
         log_time(log_start_time,"Time Taken in First Stage Wich is Reading data FRom Csv and Casting to Proper dataType")
         csv_count = csv.count()
         logger.info(f"readCsv rows count: {csv_count}")
+        
+        if csv_count == 0:
+            logger.info("CSV row count is 0.")
 
         #Rule---1 It will Check the csv.part_num to the x_product_code_1_digit.code  if data resent take the id and put 
         #in csv.prod_cd1 if not insert and take id and put csv.prod_cd1
@@ -946,12 +997,12 @@ def main(local_file_path, spark, properties, url):
         log_time(log_time_start, "-------------Time Taken in Rule 7 Implementation-------------------")
         print('csv count after 7 rule ------------------> ',csv.count())
 
-        csv = csv.withColumn('updated_by', lit("admin"))\
+        csv = csv.withColumn('updated_by', lit("system@spriced.com"))\
                  .withColumn('updated_date', lit(datetime.now()))\
                  .withColumn('validationstatus', lit(" "))\
                  .withColumn('is_valid', lit(False))\
                  .withColumn('created_date', lit(datetime.now()))\
-                 .withColumn('created_by', lit("admin"))\
+                 .withColumn('created_by', lit("system@spriced.com"))\
                  .withColumn('comment', lit(" "))\
                  .filter(col('code').isNotNull())
         
@@ -992,10 +1043,12 @@ def main(local_file_path, spark, properties, url):
 
         log_time_start = time.time()
         logger.info("Update Table process start")
-        code_matching = hash_table_db.join(csv, "code", 'inner')
-        code_matching = code_matching.drop(hash_table_db['hash_value'])
-        code_matching = code_matching.drop(hash_table_db['check_sum'])
-        csv = code_matching.drop(hash_table_db['id'])
+        # hash_table_db = spark.read.jdbc(url=url, table="part_regional_hash", properties=properties)
+
+        # code_matching = hash_table_db.join(csv, "code", 'inner')
+        # code_matching = code_matching.drop(hash_table_db['hash_value'])
+        # code_matching = code_matching.drop(hash_table_db['check_sum'])
+        # csv = code_matching.drop(hash_table_db['id'])
         data_to_update_staging_table(csv,hash_table_db,url,properties)
         log_time(log_time_start, "Time Taken for Update Method")
     except Exception as e:
@@ -1009,7 +1062,7 @@ def part_regional_table_step_2_insert_into_main(spark, properties, db_url):
     connection = None
     try:
         # psycopg2 Property
-        logger.info("Step 2 Started . method NAme part_regional_table_step_2_insert_into_main")
+        logger.info("Step 2 Started . method Name part_regional_table_step_2_insert_into_main")
         connection = psycopg2.connect(user=db_user, password=db_password, host=db_host, port=db_port, database=db_name)
         cursor = connection.cursor()
 
@@ -1182,7 +1235,8 @@ def part_regional_table_step_3_update_into_main():
                     FROM
                         part_regional_update_staging AS source
                     WHERE
-                        part_regional.part_num = source.part_num;
+                        part_regional.part_num = source.part_num AND
+                        part_regional.rgcd = source.rgcd;
 
                     TRUNCATE TABLE part_regional_update_staging;
 
