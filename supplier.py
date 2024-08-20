@@ -289,6 +289,11 @@ def read_csv_data(path_to_csv, spark):
     try:
         df = spark.read.csv(path_to_csv, header=True, sep=',')
         logger.info(f"CSV data loaded from {path_to_csv}")
+
+          # Check if the DataFrame is empty
+        if df.rdd.isEmpty():
+            logger.warning(f"The CSV at {path_to_csv} contains no data.")
+            return None
         
         if 'rgcd' not in df.columns:
             df = df.withColumn("rgcd", lit(" "))
