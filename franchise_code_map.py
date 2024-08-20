@@ -78,7 +78,6 @@ schema_dict = {
         "fshipt": StringType(),
         "frchdisp": IntegerType(),
         "code": IntegerType(),
-        "rgcd": StringType(),
         "updated_by": StringType(),
         "updated_date": TimestampType(),
         "validationstatus": StringType(),
@@ -90,16 +89,15 @@ schema_dict = {
 
 def simplify_colum_with_table(df):
     try:
-        # Drop rows where 'fsoldt', 'frchdisp', 'rgcd' is null
+        # Drop rows where 'fsoldt', 'frchdisp' is null
         
         df = df.filter((col('fsoldt').isNotNull()) & 
-                       (col('frchdisp').isNotNull()) &
-                       (col('rgcd').isNotNull()))
+                       (col('frchdisp').isNotNull())
         
-        df = df.dropDuplicates(['fsoldt', 'frchdisp', 'rgcd'])
+        df = df.dropDuplicates(['fsoldt', 'frchdisp'])
         
-        logger.info("Rows with null values in 'fsoldt', 'frchdisp', 'rgcd' dropped "
-                    "and duplicates based on 'fsoldt', 'frchdisp', 'rgcd'  removed")
+        logger.info("Rows with null values in 'fsoldt', 'frchdisp' dropped "
+                    "and duplicates based on 'fsoldt', 'frchdisp'  removed")
         return df
     except Exception as e:
         logger.error(f"Error in simplify_colum_with_table: {e}")
@@ -282,9 +280,6 @@ def read_csv_data(path_to_csv, spark):
         df = spark.read.csv(path_to_csv, header=True, sep=',')
         logger.info(f"CSV data loaded from {path_to_csv}")
         
-        if 'rgcd' not in df.columns:
-            df = df.withColumn("rgcd", lit(" "))
-         
         df = df.toDF(*(c.lower() for c in df.columns))
 
         for column_name, data_type  in schema_dict.items():
@@ -296,8 +291,8 @@ def read_csv_data(path_to_csv, spark):
         logger.info(f"CSV row count: {csv_count}")
 
         df = simplify_colum_with_table(df)
-        # Add 'code' column fsoldt', 'frchdisp', 'rgcd'
-        df = df.withColumn('code', concat_ws("",col('fsoldt'), col('frchdisp'), col('rgcd')))
+        # Add 'code' column fsoldt', 'frchdisp'
+        df = df.withColumn('code', concat_ws("",col('fsoldt'), col('frchdisp')))
         return df
     except Exception as e:
         logger.error(f"Error in read_csv_data: {e}")
@@ -482,7 +477,6 @@ def Franchise_Code_Map_table_step_3_update_into_main():
                     fsoldt = sourceTable.fsoldt,
                     fshipt = sourceTable.fshipt,
                     frchdisp = sourceTable.frchdisp,
-                    rgcd = sourceTable.rgcd,
                     updated_by = sourceTable.updated_by,
                     updated_date = sourceTable.updated_date,
                     validationstatus = sourceTable.validationstatus,
@@ -494,8 +488,7 @@ def Franchise_Code_Map_table_step_3_update_into_main():
                     Franchise_Code_Map_update_staging AS sourceTable
                 WHERE
                     Franchise_Code_Map.fsoldt = sourceTable.fsoldt AND
-                    Franchise_Code_Map.frchdisp = sourceTable.frchdisp AND
-                    Franchise_Code_Map.rgcd = sourceTable.rgcd;
+                    Franchise_Code_Map.frchdisp = sourceTable.frchdisp
                 
                 TRUNCATE TABLE Franchise_Code_Map_update_staging;
 
