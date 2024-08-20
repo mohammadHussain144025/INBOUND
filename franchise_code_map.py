@@ -92,12 +92,13 @@ def simplify_colum_with_table(df):
         # Drop rows where 'fsoldt', 'frchdisp' is null
         
         df = df.filter((col('fsoldt').isNotNull()) & 
-                       (col('frchdisp').isNotNull())
+                       (col('frchdisp').isNotNull()) & 
+                       (col('fdscd').isNotNull()))
         
-        df = df.dropDuplicates(['fsoldt', 'frchdisp'])
+        df = df.dropDuplicates(['fsoldt', 'frchdisp', 'fdscd'])
         
-        logger.info("Rows with null values in 'fsoldt', 'frchdisp' dropped "
-                    "and duplicates based on 'fsoldt', 'frchdisp'  removed")
+        logger.info("Rows with null values in 'fsoldt', 'frchdisp', 'fdscd' dropped "
+                    "and duplicates based on 'fsoldt', 'frchdisp', 'fdscd' removed")
         return df
     except Exception as e:
         logger.error(f"Error in simplify_colum_with_table: {e}")
@@ -296,8 +297,8 @@ def read_csv_data(path_to_csv, spark):
         logger.info(f"CSV row count: {csv_count}")
 
         df = simplify_colum_with_table(df)
-        # Add 'code' column fsoldt', 'frchdisp'
-        df = df.withColumn('code', concat_ws("",col('fsoldt'), col('frchdisp')))
+        # Add 'code' column fsoldt', 'frchdisp', 'fdscd'
+        df = df.withColumn('code', concat_ws("",col('fsoldt'), col('frchdisp'), col('fdscd')))
         return df
     except Exception as e:
         logger.error(f"Error in read_csv_data: {e}")
@@ -493,7 +494,8 @@ def Franchise_Code_Map_table_step_3_update_into_main():
                     Franchise_Code_Map_update_staging AS sourceTable
                 WHERE
                     Franchise_Code_Map.fsoldt = sourceTable.fsoldt AND
-                    Franchise_Code_Map.frchdisp = sourceTable.frchdisp
+                    Franchise_Code_Map.frchdisp = sourceTable.frchdisp AND
+                    Franchise_Code_Map.fdscd = sourceTable.fdscd;
                 
                 TRUNCATE TABLE Franchise_Code_Map_update_staging;
 
