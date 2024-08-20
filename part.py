@@ -370,6 +370,11 @@ def decrypt_file_and_extract_csv(encrypted_file, csv_file_directory, temp_file_d
 def read_csv_data(path_to_csv, spark):
     try:
         df = spark.read.csv(path_to_csv, header=True, sep=',')
+          # Check if the DataFrame is empty
+        if df.rdd.isEmpty():
+            logger.warning(f"The CSV at {path_to_csv} contains no data.")
+            return None
+        
         df = df.drop("lpp_part")
         df = df.withColumn("prdmgr",lit(1))
         df = df.withColumn("brnd_cd",lit(1))
