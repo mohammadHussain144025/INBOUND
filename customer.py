@@ -312,9 +312,9 @@ def read_csv_data(path_to_csv, spark):
         df = spark.read.csv(path_to_csv, header=True, sep=',')
         logger.info(f"CSV data loaded from {path_to_csv}")
 
-          # Check if the DataFrame is empty
-        if df.rdd.isEmpty():
-            logger.warning(f"The CSV at {path_to_csv} contains no data.")
+        # Check if the DataFrame is empty
+        if df.head(1) == []:
+            logger.info(f"The CSV at {path_to_csv} contains no data.")
             return None
 
         # Adding columns for testing purposes
@@ -581,7 +581,7 @@ def join_operation_with_x_ship_to(csvdf, xshiptodf, spark, url, properties):
         new_x_ship_to = spark.read.jdbc(url=url, table="x_ship_to", properties=properties)
 
         match_df = match_csv_and_customer(csvdf, new_x_ship_to, columnNameToAddWithMatchDf="shpto")
-        matched_df = match_df.drop("code")
+        matched_df = match_df.drop("code", "rgcd", 'shtcode')
         
         return matched_df
     except Exception as e:
@@ -617,7 +617,7 @@ def join_operation_with_x_sold_to(csvdf, xsoldtodf, spark, url, properties):
         new_x_sold_to = spark.read.jdbc(url=url, table="x_sold_to", properties=properties)
 
         match_df = match_csv_and_customer(csvdf, new_x_sold_to, columnNameToAddWithMatchDf="sldto")
-        matched_df = match_df.drop("code")
+        matched_df = match_df.drop("code", "rgcd", "stocode")
         
         return matched_df
     except Exception as e:
@@ -714,7 +714,7 @@ def main(local_file_path,spark,properties,url):
         csv = csv.withColumn("check_sum", hash(csv['concatenated']))
         csv = csv.drop("concatenated")
         
-
+        csv = csv.drop("mmbygrp")
         logger.info(f"CSV Count after all transformations: {csv.count()}")
         
         insert_time = time.time()
