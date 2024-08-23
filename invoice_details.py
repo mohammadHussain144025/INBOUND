@@ -109,14 +109,14 @@ schema_dict = {
     "crcore": DecimalType(16, 6),
     "cinvdt": TimestampType(),
     "cshpdt": TimestampType(),
+    "clstprc": DecimalType(16, 6),
     "updated_by": StringType(),
     "updated_date": TimestampType(),
     "validationstatus": StringType(),
     "is_valid": BooleanType(),
     "created_date": TimestampType(),
     "created_by": StringType(),
-    "comment": StringType(),
-    "rgcd":StringType()
+    "comment": StringType()
 }
 
 def simplify_colum_with_table(df):
@@ -124,11 +124,9 @@ def simplify_colum_with_table(df):
         # Drop rows where 'code' is null
         df = df.filter((col('cordno').isNotNull()) & 
                        (col('cinvno').isNotNull()) & 
-                       (col('cpartno').isNotNull()) & 
-                       (col('rgcd').isNotNull()))
-        print('simplify_colum_with_table check ----------------> ', df.count())
-        df = df.dropDuplicates(['cordno', 'cinvno', 'cpartno', 'rgcd'])
-        print('simplify_colum_with_table----------------> ', df.count())
+                       (col('cpartno').isNotNull()))
+        
+        df = df.dropDuplicates(['cordno', 'cinvno', 'cpartno'])
         return df
     except Exception as e:
         logger.error(f"Error in simplify_colum_with_table: {e}")
@@ -310,8 +308,8 @@ def read_csv_data(path_to_csv, spark):
         logger.info(f"CSV data loaded from {path_to_csv}")
 
           # Check if the DataFrame is empty
-        if df.rdd.isEmpty():
-            logger.warning(f"The CSV at {path_to_csv} contains no data.")
+        if df.head(1) == []:
+            logger.info(f"The CSV at {path_to_csv} contains no data.")
             return None
             
         df = df.toDF(*(c.lower() for c in df.columns))
@@ -325,7 +323,7 @@ def read_csv_data(path_to_csv, spark):
         logger.info(f"CSV row count: {csv_count}")
 
         df = simplify_colum_with_table(df)
-        df = df.withColumn('code', concat_ws("",col('cordno'), col('cinvno'), col('cpartno'), col('rgcd')))
+        df = df.withColumn('code', concat_ws("",col('cordno'), col('cinvno'), col('cpartno')))
         return df
     except Exception as e:
         logger.error(f"Error in read_csv_data: {e}")
@@ -525,7 +523,7 @@ def invoice_table_step_3_update_into_main():
                 crcore = sourceTable.crcore,
                 cinvdt = sourceTable.cinvdt,
                 cshpdt = sourceTable.cshpdt,
-                rgcd = sourceTable.rgcd,
+                clstprc = sourceTable.clstprc,
                 updated_by = sourceTable.updated_by,
                 updated_date = sourceTable.updated_date,
                 validationstatus = sourceTable.validationstatus,
@@ -538,8 +536,7 @@ def invoice_table_step_3_update_into_main():
             WHERE
                 coninv.cordno = sourceTable.cordno AND
                 coninv.cinvno = sourceTable.cinvno AND
-                coninv.cpartno = sourceTable.cpartno AND
-                coninv.rgcd = sourceTable.rgcd;
+                coninv.cpartno = sourceTable.cpartno;
 
             TRUNCATE TABLE coninv_update_staging;
 
