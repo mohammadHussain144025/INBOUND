@@ -392,7 +392,7 @@ def main(local_file_path,spark,properties,url):
  
         csv = csv.withColumn('updated_by', lit("system@spriced.com"))\
                  .withColumn('updated_date', lit(datetime.now()))\
-                 .withColumn('validationstatus', lit(" "))\
+                 .withColumn('validationstatus', lit("true"))\
                  .withColumn('is_valid', lit(False))\
                  .withColumn('created_date', lit(datetime.now()))\
                  .withColumn('created_by', lit("system@spriced.com"))\
