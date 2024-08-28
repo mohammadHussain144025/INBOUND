@@ -198,7 +198,8 @@ def check_and_download_file(sftp):
                             else:
                                 raise ValueError('Unsupported file type from SFTP')
                             if output_csv_path:
-                                main(output_csv_path, spark, properties, db_url)
+                                #add region as param
+                                main(output_csv_path, spark, properties, db_url,region)
                                 supplier_table_step_2_insert_into_main(spark,properties,db_url)
                                 supplier_table_step_2_update_into_main()
                                 end_time = datetime.now()
@@ -285,7 +286,8 @@ def decrypt_file_and_extract_csv(encrypted_file, csv_file_directory, temp_file_d
         logger.error(f"Error during decryption: {str(e)}")
         return None    
 
-def read_csv_data(path_to_csv, spark):
+#add region as param
+def read_csv_data(path_to_csv, spark, region):
     try:
         df = spark.read.csv(path_to_csv, header=True, sep=',')
         logger.info(f"CSV data loaded from {path_to_csv}")
@@ -296,7 +298,11 @@ def read_csv_data(path_to_csv, spark):
             return None
         
         if 'rgcd' not in df.columns:
-            df = df.withColumn("rgcd", lit(" "))
+            logger.info("region found as ######################################################: %s",region)
+            if region == 'AUS':
+             df = df.withColumn("rgcd", lit(region))
+            else: 
+             df = df.withColumn("rgcd", lit("CA"))
         
         df = df.toDF(*(c.lower() for c in df.columns))
 
@@ -385,15 +391,17 @@ def compare_and_insert(df, main_table_df):
             mismatch_df.write.jdbc(url=db_url, table="supplier", mode="append")
     except Exception as e:
         logger.error(f"Error in compare_and_insert: {e}")
-        
-def main(local_file_path,spark,properties,url):
+
+#add region as param     
+def main(local_file_path,spark,properties,url,region):
     
     try:
         start_process_time = time.time()
         logging.info('-----------------------starting data migration------------------------------')
         log_start_time = time.time()
         
-        csv = read_csv_data(path_to_csv=local_file_path, spark=spark)
+        #add region as param
+        csv = read_csv_data(path_to_csv=local_file_path, spark=spark,region=region)
         log_time(log_start_time,"Time Taken in First Stage Wich is Reading data FRom Csv and Casting to Proper dataType")
         csv_count = csv.count()
         logger.info(f"readCsv rows count: {csv_count}")
